@@ -98,12 +98,10 @@ Load balancers SHOULD only include extensions that are specified for use in Prox
 # Use with TLS over TCP
 
 When forwarding a TLS stream over TCP, the load balancer SHOULD send a ProxyHeader at the beginning of the stream:
-
-
 ```
 struct {
   uint8 opaque_type = 0;
-  uint16 version = 0;
+  ProtocolVersion version = 0;
   uint16 length = length(ProxyHeader.contents);
   EncryptedProxyData contents;
 } ProxyHeader;
@@ -122,6 +120,17 @@ A QUIC load balancer provides this service by extracting the ClientHello from an
 
 The backend, upon receipt of a packet with QUIC version TBD, reverses this transformation to recover the original Initial packet and extract the proxy data for this connection.
 
+
+# Configuration
+The method of configuring of the PSK on the load balancer and backend is not specified here.  However, the PSK MAY be represented as a ProxyKey:
+```
+struct {
+  ProtocolVersion version = 0;
+  opaque psk_identity<1..2^16-1>;
+  CipherSuite cipher_suite;
+  opaque key<16..2^16-1>
+} ProxyKey;
+```
 
 # IANA Considerations
 
