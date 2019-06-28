@@ -1,4 +1,5 @@
-# TLS Metadata for Load Balancers (TLS-LB)
+docname: draft-schwartz-tls-lb-latest
+title: TLS Metadata for Load Balancers (TLS-LB)
 
 Status: Draft
 
