@@ -50,7 +50,6 @@ When a TCP load balancer forwards a TLS stream, the load balancer has no way to 
 
 The PROXY protocol is widely used, but it offers no confidentiality or integrity protection, and therefore might not be suitable when the load balancer and backend communicate over the public internet.
 
-
 # Goals
 
 *   Enable TCP load balancers to forward metadata to the backend.
@@ -64,6 +63,29 @@ The PROXY protocol is widely used, but it offers no confidentiality or integrity
 *   Support use in QUIC.
 *   Enable simple and safe implementation.
 
+# Overview
+
+The proposed protocol provides one-way communication from a load balancer to a backend server.  It works by prepending information to the forwarded connection:
+
+    +-----------+ +-----------+ +-----------+
+    | Backend A | | Backend B | | Backend C |
+    +-----------+ +-----------+ +-----------+
+                     \/   /\
+     4. ServerHello  \/   /\  2. EncryptedProxyData[SNI="secret.b",
+                     \/   /\          client=2, etc.]
+                     \/   /\  3. ClientHello (verbatim)
+                     \/   /\
+                +---------------+
+                | Load balancer |
+                +---------------+
+                     \/   /\
+     5. ServerHello  \/   /\  1. ClientHello[ESNI=enc("secret.b")]
+        (verbatim)   \/   /\
+                     \/   /\
+    +-----------+ +-----------+ +-----------+
+    |  Client 1 | |  Client 2 | |  Client 3 |
+    +-----------+ +-----------+ +-----------+
+{: #diagram title="Data flow diagram"}
 
 # Encoding
 
