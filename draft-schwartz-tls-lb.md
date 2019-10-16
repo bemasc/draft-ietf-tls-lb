@@ -48,11 +48,12 @@ A load balancer operates at a specific point in the protocol stack, forwarding e
 
 When a TCP load balancer forwards a TLS stream, the load balancer has no way to incorporate additional information into the stream.  Insertion of any additional data would cause the connection to fail.  However, the load-balancer and backend can share additional information if they agree to speak a new protocol.  The most popular protocol used for this purpose is currently the PROXY protocol {{PROXY}}, developed by HAPROXY.  This protocol prepends a plaintext collection of metadata (e.g. client IP address) onto the TCP socket.  The backend can parse this metadata, then pass the remainder of the stream to its TLS library.
 
-The PROXY protocol is widely used, but it offers no confidentiality or integrity protection, and therefore might not be suitable when the load balancer and backend communicate over the public internet.
+The PROXY protocol is effective and widely used, but it offers no confidentiality or integrity protection, and therefore might not be suitable when the load balancer and backend communicate over the public internet.  It also does not offer a way for the backend to reply.
 
 # Goals
 
 *   Enable TCP load balancers to forward metadata to the backend.
+*   Enable backends to reply.
 *   Reduce the need for TLS-terminating load balancers.
 *   Ensure confidentiality and integrity for all forwarded metadata.
 *   Enable split ESNI architectures.
@@ -65,26 +66,27 @@ The PROXY protocol is widely used, but it offers no confidentiality or integrity
 
 # Overview
 
-The proposed protocol provides one-way communication from a load balancer to a backend server.  It works by prepending information to the forwarded connection:
+The proposed protocol supports a two-way exchange between a load balancer and a backend server.  It works by prepending information to the TLS handshake:
 
-    +-----------+ +-----------+ +-----------+
-    | Backend A | | Backend B | | Backend C |
-    +-----------+ +-----------+ +-----------+
-                     \/   /\
-    4. ServerHello,  \/   /\  2. EncryptedProxyData[SNI: "secret.b",
-       etc.          \/   /\          client: 2, etc.]
-                     \/   /\  3. ClientHello (verbatim)
-                     \/   /\
-                +---------------+
-                | Load balancer |
-                +---------------+
-                     \/   /\
-    5. ServerHello,  \/   /\  1. ClientHello[ESNI: enc("secret.b")]
-    etc. (verbatim)  \/   /\
-                     \/   /\
-    +-----------+ +-----------+ +-----------+
-    |  Client 1 | |  Client 2 | |  Client 3 |
-    +-----------+ +-----------+ +-----------+
+         +-----------+ +-----------+ +-----------+
+         | Backend A | | Backend B | | Backend C |
+         +-----------+ +-----------+ +-----------+
+                           \/   /\
+    4. EncryptedProxyData[ \/   /\  2. EncryptedProxyData[
+        got SNI info]      \/   /\       SNI="secret.b",
+    5. ServerHello, etc.   \/   /\       client=2, etc.]
+                           \/   /\  3. ClientHello (verbatim)
+                           \/   /\
+                      +---------------+
+                      | Load balancer |
+                      +---------------+
+                           \/   /\
+    6. ServerHello, etc.   \/   /\  1. ClientHello[
+       (verbatim)          \/   /\       ESNI=enc("secret.b")]
+                           \/   /\
+          +-----------+ +-----------+ +-----------+
+          |  Client 1 | |  Client 2 | |  Client 3 |
+          +-----------+ +-----------+ +-----------+
 {: #diagram title="Data flow diagram"}
 
 # Encoding
@@ -96,9 +98,18 @@ A ProxyExtension is identical in form to a standard TLS Extension (Section 4.2 o
       opaque extension_data<0..2^16-1>;
     } ProxyExtension;
 
+ProxyExtensions can be sent in an upstream (to the backend) or downstream (to the load balancer) direction
+
+    enum {
+      upstream(0),
+      downstream(1),
+      (255)
+    } ProxyDataDirection;
+
 The ProxyData contains a set of ProxyExtensions.
 
     struct {
+      ProxyDataDirection direction;
       ProxyExtension proxy_data<0..2^16-1>;
     } ProxyData;
 
@@ -114,28 +125,65 @@ The EncryptedProxyData structure contains metadata associated with the original 
 - nonce: Non-repeating initializer for the AEAD.  This prevents an attacker from observing whether the same ClientHello is marked with different metadata over time.
 - encrypted_proxy_data: AEAD-Encrypt(key, nonce, additional_data=ClientHello, plaintext=ProxyData).  The key and AEAD function are agreed out of band and associated with psk_identity.
 
-When the load balancer receives a ClientHello, it serializes any relevant metadata into a ProxyData, then encrypts it with the ClientHello as additional data, to produce EncryptedProxyData.
+When the load balancer receives a ClientHello, it serializes any relevant metadata into an upstream ProxyData, then encrypts it with the ClientHello as additional data to produce the EncryptedProxyData.  The backend's reply is a downstream ProxyData struct, also transmitted as an EncryptedProxyData using the ClientHello as additional data.  Recipients in each case MUST verify that ProxyData.direction has the expected value, and discard the connection if it does not.
 
+The downstream ProxyData SHOULD NOT contain any ProxyExtensionType values that were not present in the upstream ProxyData.
 
 # Defined ProxyExtensions
 
-Like a standard TLS Extension, a ProxyExtension is identified by a 2-byte type number.  There are initially three type numbers allocated:
+Like a standard TLS Extension, a ProxyExtension is identified by a 2-byte type number.  Load balancers MUST only include extensions that are specified for use in ProxyData.  Backends MUST ignore any extensions that they do not recognize.
+
+There are initially four type numbers allocated:
 
     enum {
       padding(0),
       network_address(1),
       esni_inner(2),
+      overload(3)
       (65535)
     } ProxyExtensionType;
 
-The “padding” extension functions as described in {{!RFC7685}}.  It is used here to avoid leaking information about the other extensions.
+## padding
 
-The “network_address” extension functions as described in {{!I-D.kinnear-tls-client-net-address}}.  It conveys the client IP address observed by the load balancer.
+The "padding" extension functions as described in {{!RFC7685}}.  It is used here to avoid leaking information about the other extensions.
 
-The “esni_inner” extension can only be used if the ClientHello contains the encrypted_server_name extension {{!ESNI=I-D.ietf-tls-esni}}.  The extension_data is the ClientESNIInner (Section 5.1.1 of {{ESNI}}), which contains the true SNI and nonce.  This is useful when the load balancer knows the ESNI private key and the backend does not, i.e. split mode ESNI.
+## network_address
 
-Load balancers SHOULD only include extensions that are specified for use in ProxyData, and backends MUST ignore any extensions that they do not recognize.
+The "network_address" extension functions as described in {{!I-D.kinnear-tls-client-net-address}}.  It conveys the client IP address observed by the load balancer.  Backends that make use of this extension SHOULD include an empty network_address value in the downstream ProxyData.
 
+## esni_inner
+
+The "esni_inner" extension can only be used if the ClientHello contains the encrypted_server_name extension {{!ESNI=I-D.ietf-tls-esni}}.  The upstream extension_data is the ClientESNIInner (Section 5.1.1 of {{ESNI}}), which contains the true SNI and nonce.  This is useful when the load balancer knows the ESNI private key and the backend does not, i.e. split mode ESNI.
+
+## overload
+
+In the upstream ProxyData, the "overload" extension contains a single uint16 indicating the approximate proportion of connections that are being routed to this server as a fraction of 65535.  If there is only one server, load balancers SHOULD set the value to 65535 or omit this extension.
+
+In the downstream ProxyData, the value is an OverloadValue:
+
+    enum {
+      nominal(0),
+      drain(1),
+      reject(2),
+      (255)
+    } OverloadState;
+    struct {
+      OverloadState state;
+      uint16 load;
+      uint32 ttl;
+    } OverloadValue;
+
+When OverloadValue.state is "nominal", the backend is accepting connections normally.  The "drain" state indicates that the backend is accepting this connection, but would prefer not to receive additional connections.  A value of "reject" indicates that the backend did not accept this connection.  When sending a "reject" response, the backend SHOULD close the connection without sending a ServerHello.
+
+OverloadValue.load indicates the relative load state of the responding backend server, in arbitrary units.  All backend servers for an origin SHOULD report load values in the same scale.
+
+The load balancer SHOULD treat this information as valid for OverloadValue.ttl seconds, or until it receives another OverloadValue from that server.
+
+Load balancers that have multiple available backends for an origin SHOULD avoid connecting to servers that are in the "drain" or "reject" state.  When a connection is rejected, the load balancer MAY retry that connection by sending the ClientHello to a different backend server.  When multiple servers are in the "nominal" state, the load balancer should direct more connections to servers with smaller OverloadValue.load.
+
+When there is a server in an unknown state, the load balancer SHOULD direct at least one connection to it, in order to refresh its OverloadState.
+
+If all servers are in the "drain" or "reject" state, the load balancer SHOULD drop the connection.
 
 # Use with TLS over TCP
 
@@ -154,6 +202,8 @@ Following the ProxyHeader, the load balancer MUST send the full contents of the 
 
 When receiving a ProxyHeader with an unrecognized version, the backend SHOULD ignore this ProxyHeader and proceed as if the following byte were the first byte received.
 
+Similarly, the backend SHOULD reply with the downstream EncryptedProxyData in a ProxyHeader, followed by the normal TLS stream, beginning with a TLSPlaintext frame containing the ServerHello.  If the downstream ProxyHeader is not present, has an unrecognized version number,
+or produces an error, the load balancer SHOULD proxy the rest of the stream regardless.
 
 # Use with QUIC
 
@@ -168,11 +218,13 @@ In QUIC version 1, each handshake begins with an Initial packet sent by the clie
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     |                         Version (32)                          |
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |DCIL(4)|SCIL(4)|
+    | DCID Len (8)  |
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |               Destination Connection ID (0/32..144)         ...
+    |               Destination Connection ID (0..160)            ...
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                 Source Connection ID (0/32..144)            ...
+    | SCID Len (8)  |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                 Source Connection ID (0..160)               ...
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     |                         Token Length (i)                    ...
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -186,22 +238,24 @@ In QUIC version 1, each handshake begins with an Initial packet sent by the clie
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 {: #initial-format title="QUIC Initial Packet"}
 
-A client Initial packet contains a complete ClientHello, in a CRYPTO frame in the payload.  The load balancer extracts this ClientHello in order to compute EncryptedProxyData.
+A client Initial packet contains a complete ClientHello, in a CRYPTO frame in the payload.  The load balancer extracts this ClientHello in order to compute the upstream EncryptedProxyData, and the backend uses it to compute the reply.
 
 TODO: Confirm that HelloRetryRequest elicits an Initial containing a complete ClientHello.  The QUIC draft text is unclear.
 
-To send EncryptedProxyData to the backend, the load balancer constructs a new packet with a header copied from the Initial, but with a frame type of 0x1 and a new version (0xTBD).  Its payload consists of the old Initial's version number (currently always 1) and the EncryptedProxyData.
+To send an EncryptedProxyData along with an initial, the sender constructs a new packet with a header copied from the Initial, but with a new version (0xTBD1) that is only used for ProxyData.  Its payload consists of the old Initial's version number (currently always 1) and the EncryptedProxyData.
 
     +-+-+-+-+-+-+-+-+
-    |1|1| 1 |R R|P P|
+    |1|1| 0 |R R|P P|
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                   New Version, 0xTBD (32)                     |
+    |                Proxy Data Version, 0xTBD1 (32)                |
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |DCIL(4)|SCIL(4)|
+    | DCID Len (8)  |
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |               Destination Connection ID (0/32..144)         ...
+    |               Destination Connection ID (0..160)            ...
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                 Source Connection ID (0/32..144)            ...
+    | SCID Len (8)  |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                 Source Connection ID (0..160)               ...
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     |                         Token Length (i)                    ...
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -217,12 +271,15 @@ To send EncryptedProxyData to the backend, the load balancer constructs a new pa
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 {: #new-packet-format title="EncryptedProxyData packet to the backend"}
 
-The load balancer then forwards the client Initial unmodified, except for replacing its Version number with 0xTBD.  All other QUIC packets are forwarded entirely unmodified.
+The sender then forwards the Initial unmodified, except for replacing its Version number with 0xTBD2.  All other QUIC packets are forwarded entirely unmodified.
 
-The backend, upon receipt of a packet with QUIC version 0xTBD and type "0" or "1", waits for a second packet with version 0xTBD, the other type value, and matching connection IDs, token, and packet number.  When both packets have been received, the backend can reconstruct the original Initial packet and decrypt the EncryptedProxyData.
+The recipient, upon receipt of an Initial packet with QUIC version 0xTBD1 or 0xTBD2, waits for a second Initial packet with the other version and matching connection IDs, token, and packet number.  When both packets have been received, the backend can reconstruct the original Initial packet and decrypt the EncryptedProxyData.
 
-If the second packet is not received within a brief time period (e.g. 100 ms), the backend SHOULD discard the first packet.
+If the second packet is not received within a brief time period (e.g. 100 ms), the recipient SHOULD discard the first packet.
 
+This procedure is designed to bind both packets together without altering the size of the original Initial, which QUIC uses for path MTU detection.  Load balancers SHOULD apply this procedure to the Client Initial and the upstream ProxyData, and backends SHOULD apply it to the Server Initial and the downstream ProxyData.
+
+Note that there is no explicit packet loss recovery for the ProxyData packet.  Instead, we rely on the QUIC implementation to retransmit the Initial if it is discarded.  Accordingly, senders MUST retransmit the ProxyData packet along with any retransmitted Initial.  Load balancers MAY retransmit the Client Initial and upstream ProxyData if no reply is received, and backends MUST ignore ProxyData associated with a duplicate Client Initial.
 
 # Configuration
 The method of configuring of the PSK on the load balancer and backend is not specified here.  However, the PSK MAY be represented as a ProxyKey:
@@ -237,14 +294,16 @@ The method of configuring of the PSK on the load balancer and backend is not spe
 # Security considerations
 
 ## Integrity
-This protocol is intended to provide the backend with a strong guarantee of integrity for the metadata written by the load balancer.  For example, an active attacker cannot take metadata intended for one stream and attach it to another, because each stream will have a unique ClientHello, and the metadata is bound to the ClientHello by AEAD.
+
+This protocol is intended to provide both parties with a strong guarantee of integrity for the metadata they receive.  For example, an active attacker cannot take metadata intended for one stream and attach it to another, because each stream will have a unique ClientHello, and the metadata is bound to the ClientHello by AEAD.
 
 One exception to this protection is in the case of an attacker who deliberately reissues identical ClientHello messages.  An attacker who reuses a ClientHello can also reuse the metadata associated with it, if they can first observe the EncryptedProxyData transferred between the load balancer and the backend.  This could be used by an attacker to reissue data originally generated by a true client (e.g. as part of a 0-RTT replay attack), or it could be used by a group of adversaries who are willing to share a single set of client secrets while initiating different sessions, in order to reuse metadata that they find helpful.
 
 As such, the backend SHOULD treat this metadata as advisory.
 
 ## Confidentiality
-This protocol is intended to maintain confidentiality of the metadata transferred between the load balancer and backend, currently consisting of the ESNI plaintext and the client IP address.  An observer between the client and the load balancer does not observe this protocol at all, and an observer between the load balancer and backend observes only ciphertext.
+
+This protocol is intended to maintain confidentiality of the metadata transferred between the load balancer and backend, especially the ESNI plaintext and the client IP address.  An observer between the client and the load balancer does not observe this protocol at all, and an observer between the load balancer and backend observes only ciphertext.
 
 However, an adversary who can monitor both of these links can easily observe that a connection from the client to the load balancer is shortly followed by a connection from the load balancer to a backend, with the same ClientHello.  This reveals which backend server the client intended to visit.  In many cases, the choice of backend server could be the sensitive information that ESNI is intended to protect.
 
@@ -258,10 +317,12 @@ Need to allocate TBD as a reserved QUIC version code.
 
 # Acknowledgements
 
-This is an elaboration of an idea proposed by Eric Rescorla during the development of ESNI.  Thanks to David Schinazi and David Benjamin for suggesting important improvements.
+This is an elaboration of an idea proposed by Eric Rescorla during the development of ESNI.  Thanks to David Schinazi, David Benjamin, and Piotr Sikora for suggesting important improvements.
 
 
 # Open Questions
 
 Should the ProxyExtensionType registry have a reserved range for private extensions?
+
+Would it be secure to bind only to ClientHello.random?  Or should we bind to a hash of the ClientHello instead of the ClientHello itself?  This would reduce the amount of buffering required at the load balancer.  
 
