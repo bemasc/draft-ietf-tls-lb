@@ -279,7 +279,7 @@ If the second packet is not received within a brief time period (e.g. 100 ms), t
 
 This procedure is designed to bind both packets together without altering the size of the original Initial, which QUIC uses for path MTU detection.  Load balancers SHOULD apply this procedure to the Client Initial and the upstream ProxyData, and backends SHOULD apply it to the Server Initial and the downstream ProxyData.
 
-Note that there is no explicit packet loss recovery for the ProxyData packet.  Instead, we rely on the QUIC implementation to retransmit the Initial if it is discarded.  Accordingly, senders MUST retransmit the ProxyData packet along with any retransmitted Initial.  Load balancers MAY retransmit the Client Initial and upstream ProxyData if no reply is received, and backends MUST ignore ProxyData associated with a duplicate Client Initial.
+Note that there is no explicit packet loss recovery for the ProxyData packet.  Instead, we rely on the QUIC implementation to retransmit the Initial if it is discarded.  Accordingly, senders MUST retransmit the ProxyData packet along with any retransmitted Initial.  Load balancers MAY retransmit the Client Initial and upstream ProxyData if no reply is received, and recipients MUST ignore ProxyData associated with a duplicate Initial.
 
 # Configuration
 The method of configuring of the PSK on the load balancer and backend is not specified here.  However, the PSK MAY be represented as a ProxyKey:
@@ -324,5 +324,4 @@ This is an elaboration of an idea proposed by Eric Rescorla during the developme
 
 Should the ProxyExtensionType registry have a reserved range for private extensions?
 
-Would it be secure to bind only to ClientHello.random?  Or should we bind to a hash of the ClientHello instead of the ClientHello itself?  This would reduce the amount of buffering required at the load balancer.  
-
+Would it be secure to bind only to ClientHello.random?  Or should we bind to a hash of the ClientHello instead of the ClientHello itself?  This might reduce the amount of buffering required at the load balancer.
