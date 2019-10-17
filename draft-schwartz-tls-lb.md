@@ -133,13 +133,14 @@ The downstream ProxyData SHOULD NOT contain any ProxyExtensionType values that w
 
 Like a standard TLS Extension, a ProxyExtension is identified by a 2-byte type number.  Load balancers MUST only include extensions that are specified for use in ProxyData.  Backends MUST ignore any extensions that they do not recognize.
 
-There are initially four type numbers allocated:
+There are initially five type numbers allocated:
 
     enum {
       padding(0),
       network_address(1),
       esni_inner(2),
-      overload(3)
+      overload(3),
+      ratchet(4),
       (65535)
     } ProxyExtensionType;
 
@@ -184,6 +185,32 @@ Load balancers that have multiple available backends for an origin SHOULD avoid 
 When there is a server in an unknown state, the load balancer SHOULD direct at least one connection to it, in order to refresh its OverloadState.
 
 If all servers are in the "drain" or "reject" state, the load balancer SHOULD drop the connection.
+
+## ratchet
+
+If the backend server is reachable without traversing the load balancer, and an adversary can observe packets on the link between the load balancer and the backend, then the adversary can execute a replay flooding attack, sending the backend server duplicate copies of observed EncryptedProxyData and ClientHello.  This attack can waste server resources on the Diffie-Hellman operations required to process the ClientHello, resulting in denial of service.
+
+The "ratchet" extension reduces the impact of such an attack on the backend server by allowing the backend to reject these duplicates after decrypting the ProxyData.  (This decryption uses only a symmetric cipher, so it is expected to be much faster than typical Diffie-Hellman operations.)  Its upstream payload consists of a RatchetValue:
+
+    struct {
+      uint64 index;
+      uint64 floor;
+    } RatchetValue;
+
+The load balancer initializes `index` to a random value, and executes the following procedure:
+
+1. For each new forwarded connection (to the same server under the same psk_identity), increment `index`.
+2. Set `floor` to the `index` of the earliest connection that has not yet been connected or closed.
+
+The backend server initializes `floor` upon receiving a RatchetValue for the first time, and then executes the following procedure:
+
+1. Define `a >= b` if the most significant bit of `a - b` is 0.
+2. Let `newValue` be the RatchetValue in the ProxyData.
+3. If `newValue.index < floor` , ignore the connection.
+4. If `newValue.floor >= floor`, set `floor` to `newValue.floor`.
+5. OPTIONALLY, ignore the connection if `newValue.index` has been seen recently.  This can be implemented efficiently by keeping track of index values greater than `floor` that appear to have been skipped.
+
+With these measures in place, replays can be rejected without processing the ClientHello.
 
 # Use with TLS over TCP
 
@@ -325,3 +352,5 @@ This is an elaboration of an idea proposed by Eric Rescorla during the developme
 Should the ProxyExtensionType registry have a reserved range for private extensions?
 
 Would it be secure to bind only to ClientHello.random?  Or should we bind to a hash of the ClientHello instead of the ClientHello itself?  This might reduce the amount of buffering required at the load balancer.
+
+Should the downstream ProxyData be bound to the upstream ProxyData?
