@@ -188,7 +188,7 @@ If all servers are in the "drain" or "reject" state, the load balancer SHOULD dr
 
 ## ratchet
 
-If the backend server is reachable without traversing the load balancer, and an adversary can observe packets on the link between the load balancer and the backend, then the adversary can execute a replay flooding attack, sending the backend server duplicate copies of observed EncryptedProxyData and ClientHello.  This attack can waste server resources on the Diffie-Hellman operations required to process the ClientHello, resulting in denial of service.
+If the backend server is reachable without traversing the load balancer, and an adversary can observe packets on the link between the load balancer and the backend, then that adversary can execute a replay flooding attack, sending the backend server duplicate copies of observed EncryptedProxyData and ClientHello.  This attack can waste server resources on the Diffie-Hellman operations required to process the ClientHello, resulting in denial of service.
 
 The "ratchet" extension reduces the impact of such an attack on the backend server by allowing the backend to reject these duplicates after decrypting the ProxyData.  (This decryption uses only a symmetric cipher, so it is expected to be much faster than typical Diffie-Hellman operations.)  Its upstream payload consists of a RatchetValue:
 
@@ -202,15 +202,17 @@ The load balancer initializes `index` to a random value, and executes the follow
 1. For each new forwarded connection (to the same server under the same psk_identity), increment `index`.
 2. Set `floor` to the `index` of the earliest connection that has not yet been connected or closed.
 
-The backend server initializes `floor` upon receiving a RatchetValue for the first time, and then executes the following procedure:
+The backend server initializes `floor` upon receiving a RatchetValue for the first time, and then executes the following procedure for each incoming connection:
 
-1. Define `a >= b` if the most significant bit of `a - b` is 0.
-2. Let `newValue` be the RatchetValue in the ProxyData.
-3. If `newValue.index < floor` , ignore the connection.
-4. If `newValue.floor >= floor`, set `floor` to `newValue.floor`.
-5. OPTIONALLY, ignore the connection if `newValue.index` has been seen recently.  This can be implemented efficiently by keeping track of index values greater than `floor` that appear to have been skipped.
+0. Define `a >= b` if the most significant bit of `a - b` is 0.
+1. Let `newValue` be the RatchetValue in the ProxyData.
+2. If `newValue.index < floor`, ignore the connection.
+3. If `newValue.floor >= floor`, set `floor` to `newValue.floor`.
+4. OPTIONALLY, ignore the connection if `newValue.index` has been seen recently.  This can be implemented efficiently by keeping track of `index` values greater than `floor` that appear to have been skipped.
 
 With these measures in place, replays can be rejected without processing the ClientHello.
+
+In principle, this replay protection fails after 2^64 connections when the `floor` value wraps.  On a backend server that averages 10^9 new connections per second, this would occur after 584 years.  To avoid this replay attack, load balancers and backends SHOULD establish a new PSK at least this often.
 
 # Use with TLS over TCP
 
