@@ -61,7 +61,6 @@ The PROXY protocol is effective and widely used, but it offers no confidentialit
 *   Achieve good CPU and memory efficiency.
 *   Don’t impose additional latency.
 *   Support backends that receive a mixture of direct and load-balanced TLS.
-*   Support use in QUIC.
 *   Enable simple and safe implementation.
 
 # Overview
@@ -214,7 +213,7 @@ With these measures in place, replays can be rejected without processing the Cli
 
 In principle, this replay protection fails after 2^64 connections when the `floor` value wraps.  On a backend server that averages 10^9 new connections per second, this would occur after 584 years.  To avoid this replay attack, load balancers and backends SHOULD establish a new PSK at least this often.
 
-# Use with TLS over TCP
+# Protocol wire format
 
 When forwarding a TLS stream over TCP, the load balancer SHOULD send a ProxyHeader at the beginning of the stream:
 
@@ -233,92 +232,6 @@ When receiving a ProxyHeader with an unrecognized version, the backend SHOULD ig
 
 Similarly, the backend SHOULD reply with the downstream EncryptedProxyData in a ProxyHeader, followed by the normal TLS stream, beginning with a TLSPlaintext frame containing the ServerHello.  If the downstream ProxyHeader is not present, has an unrecognized version number,
 or produces an error, the load balancer SHOULD proxy the rest of the stream regardless.
-
-# Use with QUIC
-
-A QUIC load balancer provides this service by extracting the ClientHello from any client Initial packet {{!I-D.ietf-quic-tls}}.  A multi-tenant load balancer needs to perform this extraction anyway in order to determine where the connection should be forwarded, either by SNI or ESNI.
-
-Extracting a TLS ClientHello from a QUIC handshake is a version-dependent action, so a load balancer cannot support unrecognized versions of QUIC.  If the load balancer receives a packet with an unrecognized QUIC version, it MUST reply with a VersionNegotiation packet indicating the supported versions (currently only version 1).  If the backend applies downgrade protection, it SHOULD account for the impact of the load balancer.
-
-In QUIC version 1, each handshake begins with an Initial packet sent by the client.  This packet uses the QUIC "long header" packet form, starting with a "fixed bit" of 1 and a "frame type" of 0x0.
-
-    +-+-+-+-+-+-+-+-+
-    |1|1| 0 |R R|P P|
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                         Version (32)                          |
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    | DCID Len (8)  |
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |               Destination Connection ID (0..160)            ...
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    | SCID Len (8)  |
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                 Source Connection ID (0..160)               ...
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                         Token Length (i)                    ...
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                            Token (*)                        ...
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                           Length (i)                        ...
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                    Packet Number (8/16/24/32)               ...
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                          Payload (*)                        ...
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-{: #initial-format title="QUIC Initial Packet"}
-
-A client Initial packet contains a complete ClientHello, in a CRYPTO frame in the payload.  The load balancer extracts this ClientHello in order to compute the upstream EncryptedProxyData, and the backend uses it to compute the reply.
-
-TODO: Confirm that HelloRetryRequest elicits an Initial containing a complete ClientHello.  The QUIC draft text is unclear.
-
-To send an EncryptedProxyData along with an initial, the sender constructs a new packet with a header copied from the Initial, but with a new version (0xTBD1) that is only used for ProxyData.  Its payload consists of the old Initial's version number (currently always 1) and the EncryptedProxyData.
-
-    +-+-+-+-+-+-+-+-+
-    |1|1| 0 |R R|P P|
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                Proxy Data Version, 0xTBD1 (32)                |
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    | DCID Len (8)  |
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |               Destination Connection ID (0..160)            ...
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    | SCID Len (8)  |
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                 Source Connection ID (0..160)               ...
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                         Token Length (i)                    ...
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                            Token (*)                        ...
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                         New Length (i)                      ...
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                    Packet Number (8/16/24/32)               ...
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                      Initial Version (32)                   ...
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |                       EncryptedProxyData                    ...
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-{: #new-packet-format title="EncryptedProxyData packet to the backend"}
-
-The sender then forwards the Initial unmodified, except for replacing its Version number with 0xTBD2.  All other QUIC packets are forwarded entirely unmodified.
-
-The recipient, upon receipt of an Initial packet with QUIC version 0xTBD1 or 0xTBD2, waits for a second Initial packet with the other version and matching connection IDs, token, and packet number.  When both packets have been received, the backend can reconstruct the original Initial packet and decrypt the EncryptedProxyData.
-
-If the second packet is not received within a brief time period (e.g. 100 ms), the recipient SHOULD discard the first packet.
-
-This procedure is designed to bind both packets together without altering the size of the original Initial, which QUIC uses for path MTU detection.  Load balancers SHOULD apply this procedure to the Client Initial and the upstream ProxyData, and backends SHOULD apply it to the Server Initial and the downstream ProxyData.
-
-Note that there is no explicit packet loss recovery for the ProxyData packet.  Instead, we rely on the QUIC implementation to retransmit the Initial if it is discarded.  Accordingly, senders MUST retransmit the ProxyData packet along with any retransmitted Initial.  Load balancers MAY retransmit the Client Initial and upstream ProxyData if no reply is received, and recipients MUST ignore ProxyData associated with a duplicate Initial.
-
-# Configuration
-The method of configuring of the PSK on the load balancer and backend is not specified here.  However, the PSK MAY be represented as a ProxyKey:
-
-    struct {
-      ProtocolVersion version = 0;
-      opaque psk_identity<1..2^16-1>;
-      CipherSuite cipher_suite;
-      opaque key<16..2^16-1>
-    } ProxyKey;
 
 # Security considerations
 
@@ -339,8 +252,6 @@ However, an adversary who can monitor both of these links can easily observe tha
 # IANA Considerations
 
 Need to create a new ProxyExtensionType registry.
-
-Need to allocate TBD as a reserved QUIC version code.
 
 --- back
 
