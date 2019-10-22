@@ -122,9 +122,9 @@ The EncryptedProxyData structure contains metadata associated with the original 
 
 - psk_identity: The identity of a PSK previously agreed upon by the load balancer and the backend.  Including the PSK identity allows for updating the PSK without disruption.
 - nonce: Non-repeating initializer for the AEAD.  This prevents an attacker from observing whether the same ClientHello is marked with different metadata over time.
-- encrypted_proxy_data: AEAD-Encrypt(key, nonce, additional_data=ClientHello, plaintext=ProxyData).  The key and AEAD function are agreed out of band and associated with psk_identity.
+- encrypted_proxy_data: AEAD-Encrypt(key, nonce, additional_data, plaintext=ProxyData).  The key and AEAD function are agreed out of band and associated with psk_identity.  The additional_data is context-dependent.
 
-When the load balancer receives a ClientHello, it serializes any relevant metadata into an upstream ProxyData, then encrypts it with the ClientHello as additional data to produce the EncryptedProxyData.  The backend's reply is a downstream ProxyData struct, also transmitted as an EncryptedProxyData using the ClientHello as additional data.  Recipients in each case MUST verify that ProxyData.direction has the expected value, and discard the connection if it does not.
+When the load balancer receives a ClientHello, it serializes any relevant metadata into an upstream ProxyData, then encrypts it with the ClientHello as additional_data to produce the EncryptedProxyData.  The backend's reply is a downstream ProxyData struct, also transmitted as an EncryptedProxyData, using the upstream EncryptedProxyData as additional data.  Recipients in each case MUST verify that ProxyData.direction has the expected value, and discard the connection if it does not.
 
 The downstream ProxyData SHOULD NOT contain any ProxyExtensionType values that were not present in the upstream ProxyData.
 
@@ -263,7 +263,3 @@ This is an elaboration of an idea proposed by Eric Rescorla during the developme
 # Open Questions
 
 Should the ProxyExtensionType registry have a reserved range for private extensions?
-
-Would it be secure to bind only to ClientHello.random?  Or should we bind to a hash of the ClientHello instead of the ClientHello itself?  This might reduce the amount of buffering required at the load balancer.
-
-Should the downstream ProxyData be bound to the upstream ProxyData?
