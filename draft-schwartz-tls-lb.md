@@ -255,6 +255,10 @@ This protocol is intended to maintain confidentiality of the metadata transferre
 
 However, an adversary who can monitor both of these links can easily observe that a connection from the client to the load balancer is shortly followed by a connection from the load balancer to a backend, with the same ClientHello.  This reveals which backend server the client intended to visit.  In many cases, the choice of backend server could be the sensitive information that ESNI is intended to protect.
 
+## Fingerprinting
+
+Connections to different domains might be distinguishable by the cleartext contents of the ServerHello, such as `ServerHello.cipher_suite` and `server_share.group`.  Load balancer operators with ESNI support SHOULD provide backend operators with a list of cipher suites and groups to support, and a preference order, to avoid different backends having distinctive behaviors.
+
 # IANA Considerations
 
 Need to create a new ProxyExtensionType registry.
