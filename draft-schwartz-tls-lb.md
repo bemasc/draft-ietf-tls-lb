@@ -155,6 +155,12 @@ The "network_address" extension functions as described in {{!I-D.kinnear-tls-cli
 
 The "esni_inner" extension can only be used if the ClientHello contains the encrypted_server_name extension {{!ESNI=I-D.ietf-tls-esni}}.  The upstream extension_data is the ClientESNIInner (Section 5.1.1 of {{ESNI}}), which contains the true SNI and nonce.  This is useful when the load balancer knows the ESNI private key and the backend does not, i.e. split mode ESNI.
 
+## certificate_padding
+
+The "certificate_padding" extension is only sent upstream, and contains a single uint32 value.  The backend SHOULD pad its Certificate message to the nearest multiple of this value.
+
+Padding certificates from many backends to the same length is important to avoid revealing which backend is responding to a ClientHello.  Load balancer operators SHOULD ensure that no backend has a unique certificate size after padding, and MAY set this value large enough to make all responses have equal size.
+
 ## overload
 
 In the upstream ProxyData, the "overload" extension contains a single uint16 indicating the approximate proportion of connections that are being routed to this server as a fraction of 65535.  If there is only one server, load balancers SHOULD set the value to 65535 or omit this extension.
