@@ -157,7 +157,7 @@ The "esni_inner" extension can only be used if the ClientHello contains the encr
 
 ## certificate_padding
 
-The "certificate_padding" extension is only sent upstream, and contains a single uint32 value.  The backend SHOULD pad its Certificate message to the nearest multiple of this value.
+The "certificate_padding" extension is only sent upstream, and contains a single uint32 value.  The backend SHOULD pad its Certificate message to the nearest multiple of this value.  This extension SHOULD be included whenever the "esni_inner" extension is sent, and SHOULD NOT be included otherwise.
 
 Padding certificates from many backends to the same length is important to avoid revealing which backend is responding to a ClientHello.  Load balancer operators SHOULD ensure that no backend has a unique certificate size after padding, and MAY set this value large enough to make all responses have equal size.
 
