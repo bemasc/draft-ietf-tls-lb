@@ -71,10 +71,10 @@ The proposed protocol supports a two-way exchange between a load balancer and a 
          | Backend A | | Backend B | | Backend C |
          +-----------+ +-----------+ +-----------+
                            \/   /\
-    4. EncryptedProxyData[ \/   /\  2. EncryptedProxyData[
-        got SNI info]      \/   /\       SNI="secret.b",
-    5. ServerHello, etc.   \/   /\       client=2, etc.]
-                           \/   /\  3. ClientHello (verbatim)
+    4. EncryptedProxyData[ \/   /\  3. ClientHello (verbatim)
+        got SNI info]      \/   /\  2. EncryptedProxyData[
+    5. ServerHello, etc.   \/   /\       SNI="secret.b",
+                           \/   /\       client=2, etc.]
                            \/   /\
                       +---------------+
                       | Load balancer |
@@ -120,57 +120,67 @@ The EncryptedProxyData structure contains metadata associated with the original 
       opaque encrypted_proxy_data<1..2^16-1>;
     } EncryptedProxyData;
 
-- psk_identity: The identity of a PSK previously agreed upon by the load balancer and the backend.  Including the PSK identity allows for updating the PSK without disruption.
-- nonce: Non-repeating initializer for the AEAD.  This prevents an attacker from observing whether the same ClientHello is marked with different metadata over time.
-- encrypted_proxy_data: AEAD-Encrypt(key, nonce, additional_data, plaintext=ProxyData).  The key and AEAD function are agreed out of band and associated with psk_identity.  The additional_data is context-dependent.
+- `psk_identity`: The identity of a PSK previously agreed upon by the load balancer and the backend.  Including the PSK identity allows for updating the PSK without disruption.
+- `nonce`: Non-repeating initializer for the AEAD.  This prevents an attacker from observing whether the same ClientHello is marked with different metadata over time.
+- `encrypted_proxy_data`: `AEAD-Encrypt(key, nonce, additional_data, plaintext=ProxyData)`.  The key and AEAD function are agreed out of band and associated with `psk_identity`.  The `additional_data` is context-dependent.
 
-When the load balancer receives a ClientHello, it serializes any relevant metadata into an upstream ProxyData, then encrypts it with the ClientHello as additional_data to produce the EncryptedProxyData.  The backend's reply is a downstream ProxyData struct, also transmitted as an EncryptedProxyData, using the upstream EncryptedProxyData as additional data.  Recipients in each case MUST verify that ProxyData.direction has the expected value, and discard the connection if it does not.
+When the load balancer receives a ClientHello, it serializes any relevant metadata into an upstream ProxyData, then encrypts it with the ClientHello as `additional_data` to produce the EncryptedProxyData.  The backend's reply is a downstream ProxyData struct, also transmitted as an EncryptedProxyData, using the upstream EncryptedProxyData as `additional_data`.  Recipients in each case MUST verify that `ProxyData.direction` has the expected value, and discard the connection if it does not.
 
 The downstream ProxyData SHOULD NOT contain any ProxyExtensionType values that were not present in the upstream ProxyData.
 
 # Defined ProxyExtensions
 
-Like a standard TLS Extension, a ProxyExtension is identified by a 2-byte type number.  Load balancers MUST only include extensions that are specified for use in ProxyData.  Backends MUST ignore any extensions that they do not recognize.
+Like a standard TLS Extension, a ProxyExtension is identified by a uint16 type number.  Load balancers MUST only include extensions that are registered for use in ProxyData.  Backends MUST ignore any extensions that they do not recognize.
 
-There are initially five type numbers allocated:
+There are initially seven type numbers allocated:
 
     enum {
       padding(0),
-      network_address(1),
-      esni_inner(2),
-      overload(3),
-      ratchet(4),
+      client_address(1),
+      destination_address(2),
+      esni_inner(3),
+      certificate_padding(4),
+      overload(5),
+      ratchet(6),
       (65535)
     } ProxyExtensionType;
 
 ## padding
 
-The "padding" extension functions as described in {{!RFC7685}}.  It is used here to avoid leaking information about the other extensions.
+The "padding" extension functions as described in {{!RFC7685}}.  It is used here to avoid leaking information about the other extensions.  It can be used in upstream and downstream ProxyData.
 
-## network_address
+## client_address
 
-The "network_address" extension functions as described in {{!I-D.kinnear-tls-client-net-address}}.  It conveys the client IP address observed by the load balancer.  Backends that make use of this extension SHOULD include an empty network_address value in the downstream ProxyData.
+The "client_address" extension functions as described in {{!I-D.kinnear-tls-client-net-address}}.  It conveys the client IP address observed by the load balancer.  Backends that make use of this extension SHOULD include an empty "client_address" extension in the downstream ProxyData.
+
+## destination_address
+
+The "destination_address" extension is identical to the "client_address" extension, except that it contains the load balancer's server IP address that received this connection.
 
 ## esni_inner
 
-The "esni_inner" extension can only be used if the ClientHello contains the encrypted_server_name extension {{!ESNI=I-D.ietf-tls-esni}}.  The upstream extension_data is the ClientESNIInner (Section 5.1.1 of {{ESNI}}), which contains the true SNI and nonce.  This is useful when the load balancer knows the ESNI private key and the backend does not, i.e. split mode ESNI.
+The "esni_inner" extension is only sent upstream, and can only be used if the ClientHello contains the encrypted_server_name extension {{!ESNI=I-D.ietf-tls-esni}}.  The `extension_data` is the ClientESNIInner (Section 5.1.1 of {{ESNI}}), which contains the true SNI and nonce.  This is useful when the load balancer knows the ESNI private key and the backend does not, i.e. split mode ESNI.
 
 ## certificate_padding
 
-The "certificate_padding" extension is only sent upstream, and contains a single uint32 value.  The backend SHOULD pad its Certificate message to the nearest multiple of this value.  This extension SHOULD be included whenever the "esni_inner" extension is sent, and SHOULD NOT be included otherwise.
+The "certificate_padding" extension always contains a single uint32 value.  The upstream value conveys the padding granularity `G`, and the downstream value indicates the unpadded size of the Certificate struct (Section 4.4.2 of {{!TLS13}}).
 
-Padding certificates from many backends to the same length is important to avoid revealing which backend is responding to a ClientHello.  Load balancer operators SHOULD ensure that no backend has a unique certificate size after padding, and MAY set this value large enough to make all responses have equal size.
+To pad the Handshake message (Section 4 of {{!TLS13}}) containing the Certificate struct, the backend SHOULD select the smallest `length_of_padding` (Section 5.2 of {{!TLS13}}) such that `Handshake.length + length_of_padding` is a multiple of `G`.
+
+The load balancer SHOULD include this extension whenever it sends the "esni_inner" extension.
+
+Padding certificates from many backends to the same length is important to avoid revealing which backend is responding to a ClientHello.  Load balancer operators SHOULD ensure that no backend has a unique certificate size after padding, and MAY set `G` large enough to make all responses have equal size.
 
 ## overload
 
-In the upstream ProxyData, the "overload" extension contains a single uint16 indicating the approximate proportion of connections that are being routed to this server as a fraction of 65535.  If there is only one server, load balancers SHOULD set the value to 65535 or omit this extension.
+In the upstream ProxyData, the "overload" extension contains a single uint16 indicating the approximate proportion of connections that are being routed to this server as a fraction of 65535.  If there is only one server, load balancers SHOULD set the value to 65535.
 
 In the downstream ProxyData, the value is an OverloadValue:
 
     enum {
-      nominal(0),
-      drain(1),
-      reject(2),
+      accepted(0),
+      overloaded(1),
+      rejected(2),
       (255)
     } OverloadState;
     struct {
@@ -179,17 +189,17 @@ In the downstream ProxyData, the value is an OverloadValue:
       uint32 ttl;
     } OverloadValue;
 
-When OverloadValue.state is "nominal", the backend is accepting connections normally.  The "drain" state indicates that the backend is accepting this connection, but would prefer not to receive additional connections.  A value of "reject" indicates that the backend did not accept this connection.  When sending a "reject" response, the backend SHOULD close the connection without sending a ServerHello.
+When `OverloadValue.state` is "accepted", the backend is accepting connections normally.  The "overloaded" state indicates that the backend is accepting this connection, but would prefer not to receive additional connections.  A value of "rejected" indicates that the backend did not accept this connection.  When sending a "rejected" response, the backend SHOULD close the connection without sending a ServerHello.
 
-OverloadValue.load indicates the relative load state of the responding backend server, in arbitrary units.  All backend servers for an origin SHOULD report load values in the same scale.
+`OverloadValue.load` indicates the load fraction of the responding backend server, with 65535 indicating maximum load.
 
-The load balancer SHOULD treat this information as valid for OverloadValue.ttl seconds, or until it receives another OverloadValue from that server.
+The load balancer SHOULD treat this information as valid for `OverloadValue.ttl` seconds, or until it receives another OverloadValue from that server.
 
-Load balancers that have multiple available backends for an origin SHOULD avoid connecting to servers that are in the "drain" or "reject" state.  When a connection is rejected, the load balancer MAY retry that connection by sending the ClientHello to a different backend server.  When multiple servers are in the "nominal" state, the load balancer should direct more connections to servers with smaller OverloadValue.load.
+Load balancers that have multiple available backends for an origin SHOULD avoid connecting to servers that are in the "overloaded" or "rejected" state.  When a connection is rejected, the load balancer MAY retry that connection by sending the ClientHello to a different backend server.  When multiple servers are in the "accepted" state, the load balancer MAY use `OverloadValue.load` to choose among them.
 
-When there is a server in an unknown state, the load balancer SHOULD direct at least one connection to it, in order to refresh its OverloadState.
+When there is a server in an unknown state (i.e. a new server or one whose last TTL has expired), the load balancer SHOULD direct at least one connection to it, in order to refresh its OverloadState.
 
-If all servers are in the "drain" or "reject" state, the load balancer SHOULD drop the connection.
+If all servers are in the "overloaded" or "rejected" state, the load balancer SHOULD drop the connection.
 
 ## ratchet
 
@@ -202,42 +212,32 @@ The "ratchet" extension reduces the impact of such an attack on the backend serv
       uint64 floor;
     } RatchetValue;
 
-The load balancer initializes `index` to a random value, and executes the following procedure:
+A RatchetValue is scoped to a single backend server and `psk_identity`.  Within that scope, the load balancer initializes `index` to a random value, and executes the following procedure:
 
-1. For each new forwarded connection (to the same server under the same psk_identity), increment `index`.
+1. For each new forwarded connection (to the same server under the same `psk_identity`), increment `index`.
 2. Set `floor` to the `index` of the earliest connection that has not yet been connected or closed.
 
-The backend server initializes `floor` upon receiving a RatchetValue for the first time, and then executes the following procedure for each incoming connection:
+The backend server initializes `floor` to the first `RatchetValue.floor` it receives (under a `psk_identity`), and then executes the following procedure for each incoming connection:
 
-0. Define `a >= b` if the most significant bit of `a - b` is 0.
-1. Let `newValue` be the RatchetValue in the ProxyData.
-2. If `newValue.index < floor`, ignore the connection.
-3. If `newValue.floor >= floor`, set `floor` to `newValue.floor`.
-4. OPTIONALLY, ignore the connection if `newValue.index` has been seen recently.  This can be implemented efficiently by keeping track of `index` values greater than `floor` that appear to have been skipped.
+1. Define `a >= b` if the most significant bit of `a - b` is 0.
+2. Let `newValue` be the RatchetValue in the ProxyData.
+3. If `newValue.index < floor`, ignore the connection.
+4. If `newValue.floor >= floor`, set `floor` to `newValue.floor`.
+5. OPTIONALLY, ignore the connection if `newValue.index` has been seen recently.  This can be implemented efficiently by keeping track of any `index` values greater than `floor` that appear to have been skipped.
 
 With these measures in place, replays can be rejected without processing the ClientHello.
 
 In principle, this replay protection fails after 2^64 connections when the `floor` value wraps.  On a backend server that averages 10^9 new connections per second, this would occur after 584 years.  To avoid this replay attack, load balancers and backends SHOULD establish a new PSK at least this often.
 
+Backends that are making use of the "ratchet" extension SHOULD include an empty "ratchet" extension in their downstream ProxyData.
+
 # Protocol wire format
 
-When forwarding a TLS stream over TCP, the load balancer SHOULD send a ProxyHeader at the beginning of the stream:
+When forwarding a TLS stream over TCP, the load balancer SHOULD prepend a TLSPlaintext whose `content_type` is XX (proxy_header) and whose `fragment` is the EncryptedProxyData.
 
-    struct {
-      uint8 opaque_type = 0;
-      ProtocolVersion version = 0;
-      uint16 length = length(ProxyHeader.contents);
-      EncryptedProxyData contents;
-    } ProxyHeader;
+Following this proxy header, the load balancer MUST send the full contents of the TCP stream, exactly as received from the client.  The backend will observe the proxy header, immediately followed by a TLSPlaintext containing the ClientHello.  The backend will decrypt the EncryptedProxyData using the ClientHello as associated data, and process the ClientHello and the remainder of the stream as standard TLS.
 
-The opaque_type field ensures that this header is distinguishable from an ordinary TLS connection, whose first byte is always 22 (ContentType = handshake in Section 5.1 of {{TLS13}}).  This structure matches the layout of TLSPlaintext with a ContentType of “invalid”, potentially simplifying parsing.
-
-Following the ProxyHeader, the load balancer MUST send the full contents of the TCP stream, exactly as received from the client.  The backend will observe the ProxyHeader, immediately followed by a TLSPlaintext frame containing the ClientHello.  The backend will decrypt the ProxyHeader using the ClientHello as associated data, and process the ClientHello and the remainder of the stream as standard TLS.
-
-When receiving a ProxyHeader with an unrecognized version, the backend SHOULD ignore this ProxyHeader and proceed as if the following byte were the first byte received.
-
-Similarly, the backend SHOULD reply with the downstream EncryptedProxyData in a ProxyHeader, followed by the normal TLS stream, beginning with a TLSPlaintext frame containing the ServerHello.  If the downstream ProxyHeader is not present, has an unrecognized version number,
-or produces an error, the load balancer SHOULD proxy the rest of the stream regardless.
+Similarly, the backend SHOULD reply with the downstream EncryptedProxyData in a proxy header, followed by the normal TLS stream, beginning with a TLSPlaintext frame containing the ServerHello.  If the downstream ProxyHeader is not present, has an unrecognized version number, or produces an error, the load balancer SHOULD proxy the rest of the stream regardless.
 
 # Security considerations
 
@@ -257,19 +257,22 @@ However, an adversary who can monitor both of these links can easily observe tha
 
 ## Fingerprinting
 
-Connections to different domains might be distinguishable by the cleartext contents of the ServerHello, such as `ServerHello.cipher_suite` and `server_share.group`.  Load balancer operators with ESNI support SHOULD provide backend operators with a list of cipher suites and groups to support, and a preference order, to avoid different backends having distinctive behaviors.
+Connections to different domains might be distinguishable by the cleartext contents of the ServerHello, such as `cipher_suite` and `server_share.group`.  Load balancer operators with ESNI support SHOULD provide backend operators with a list of cipher suites and groups to support, and a preference order, to avoid different backends having distinctive behaviors.
 
 # IANA Considerations
 
-Need to create a new ProxyExtensionType registry.
+IANA will be directed to add the following allocation to the TLS ContentType registry:
+
+|-------+--------------+---------+---------------|
+| Value | Description  | DTLS-OK | Reference     |
+|-------+--------------+---------+---------------|
+| XX    | proxy_header | N       | This document |
+|-------+--------------+---------+---------------|
+
+IANA will be directed to create a new "TLS ProxyExtensionType Values" registry on the TLS Extensions page.  Values less than 0x8000 will be subject to the "RFC Required" registration procedure, and the rest will be "First Come First Served".  To avoid codepoint exhaustion, proxy developers SHOULD pack all their nonstandard information into a single ProxyExtension.
 
 --- back
 
 # Acknowledgements
 
 This is an elaboration of an idea proposed by Eric Rescorla during the development of ESNI.  Thanks to David Schinazi, David Benjamin, and Piotr Sikora for suggesting important improvements.
-
-
-# Open Questions
-
-Should the ProxyExtensionType registry have a reserved range for private extensions?
